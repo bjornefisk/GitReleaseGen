@@ -12,10 +12,6 @@ See [GitHub Releases](https://github.com/bjornefisk/gitreleasegen/releases).
 
 _Released on 2025-11-12_
 
-## 2025-11-12
-
-_Released on 2025-11-12_
-
 ### Features
 - enforce prompt-engineering pipeline (`93d5971`)
 
