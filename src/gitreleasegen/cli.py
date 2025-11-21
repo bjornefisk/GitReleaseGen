@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -18,7 +19,7 @@ from .formatters import text as text_formatter
 from .git_client import CommitRange, GitRepository, TagInfo
 from .github_client import GitHubClient, GitHubSettings
 from .models import Changelog, CommitInfo, PullRequestInfo
-from .summarizer import BaseSummarizer, PromptEngineeredSummarizer
+from .summarizer import BaseSummarizer, PromptEngineeredSummarizer, SummaryRequest
 
 APP_NAME = "GitReleaseGenerator"
 DEFAULT_SUMMARY_CACHE = Path(".gitreleasegen-cache/summaries.json")
@@ -204,6 +205,78 @@ def generate(
     typer.echo(
         f"Generated changelog with {sum(len(section.items) for section in changelog.sections)} entries."
     )
+
+
+@app.command()
+def auto_commit(
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+        help="Repository path.",
+    ),
+    openai_api_key: Optional[str] = typer.Option(
+        None, envvar="OPENAI_API_KEY", help="OpenAI API key."
+    ),
+    openai_model: str = typer.Option("gpt-4o-mini", help="OpenAI model."),
+    summary_cache: Optional[Path] = typer.Option(None, help="Cache file path."),
+) -> None:
+    """Automatically generate a commit message from current changes and commit."""
+    git_repo = GitRepository(repo)
+    if not git_repo.is_dirty():
+        typer.echo("No changes to commit.")
+        raise typer.Exit()
+
+    summarizer = PromptEngineeredSummarizer(
+        api_key=openai_api_key,
+        model=openai_model,
+        cache_path=summary_cache,
+        domain_scope="git commit messages",
+    )
+
+    while True:
+        diff = git_repo.get_diff(staged=False)
+        if not diff.strip():
+            # If diff is empty, it might be because of untracked files.
+            # We stage all to ensure we capture everything intended for the commit.
+            git_repo.stage_all()
+            diff = git_repo.get_diff(staged=True)
+            if not diff.strip():
+                typer.echo("No changes found even after staging.")
+                raise typer.Exit()
+
+        request_id = str(uuid.uuid4())
+        req = SummaryRequest(identifier=request_id, title="Current changes", body=diff)
+
+        typer.echo("Generating commit message...")
+        results = list(summarizer.summarize([req]))
+        summary = results[0].summary
+
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        commit_message = f"{date_str}: {summary}"
+
+        typer.echo(f"\nProposed commit message:\n{commit_message}\n")
+
+        choice = typer.prompt("Commit? (y)es, (n)o, (r)etry, (e)dit", default="y").lower()
+
+        if choice == "y":
+            git_repo.stage_all()
+            git_repo.commit(commit_message)
+            typer.echo("Committed.")
+            break
+        elif choice == "n":
+            typer.echo("Aborted.")
+            raise typer.Exit()
+        elif choice == "r":
+            continue
+        elif choice == "e":
+            new_message = typer.prompt("Enter commit message", default=commit_message)
+            git_repo.stage_all()
+            git_repo.commit(new_message)
+            typer.echo("Committed.")
+            break
 
 
 def _resolve_commit_range(

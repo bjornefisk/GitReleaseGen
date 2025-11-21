@@ -149,6 +149,41 @@ class GitRepository:
             return None
         return match.group("owner"), match.group("repo")
 
+    def is_dirty(self) -> bool:
+        """Check if the repository has uncommitted changes."""
+        if self._use_gitpython and self._repo is not None:
+            return self._repo.is_dirty(untracked_files=True)
+        try:
+            return bool(self._run_git("status", "--porcelain").strip())
+        except Exception:
+            return False
+
+    def get_diff(self, staged: bool = False) -> str:
+        """Get the diff of changes."""
+        args = ["diff"]
+        if staged:
+            args.append("--cached")
+        else:
+            args.append("HEAD")
+
+        if self._use_gitpython and self._repo is not None:
+            return self._repo.git.diff(*args[1:])
+        return self._run_git(*args)
+
+    def stage_all(self) -> None:
+        """Stage all changes."""
+        if self._use_gitpython and self._repo is not None:
+            self._repo.git.add(".")
+        else:
+            self._run_git("add", ".")
+
+    def commit(self, message: str) -> None:
+        """Commit staged changes."""
+        if self._use_gitpython and self._repo is not None:
+            self._repo.index.commit(message)
+        else:
+            self._run_git("commit", "-m", message)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
