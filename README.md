@@ -11,6 +11,7 @@
 
 - **Automated change log** -> Build structured release notes from commits and tags.
 - **AI summarization** -> Optional OpenAI/OpenRouter support with caching to minimize costs.
+- **AI Commit Generation** -> Generate commit messages from staged changes with a free AI model.
 - **Conventional Commits friendly** -> Detects types, scopes, and breaking changes automatically.
 - **GitHub enrichment** -> Resolves pull requests and links commits for richer context.
 - **Multiple outputs** -> Render Markdown, HTML, or plain text.
@@ -28,6 +29,9 @@ helixcommit generate --unreleased --no-prs --format markdown > RELEASE_NOTES.md
 
 # Or for a specific tag range
 helixcommit generate --since-tag v1.2.0 --until-tag v1.3.0 --format html --out dist/release.html
+
+# Generate a commit message from staged changes (uses free AI model)
+helixcommit generate-commit
 ```
 
 ### From source (development)
