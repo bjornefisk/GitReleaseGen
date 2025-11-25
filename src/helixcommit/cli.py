@@ -17,6 +17,7 @@ from .commit_generator import CommitGenerator
 from .formatters import html as html_formatter
 from .formatters import markdown as markdown_formatter
 from .formatters import text as text_formatter
+from .bitbucket_client import BitbucketClient, BitbucketSettings
 from .git_client import CommitRange, GitRepository, TagInfo
 from .github_client import GitHubClient, GitHubSettings
 from .gitlab_client import GitLabClient, GitLabSettings
@@ -36,6 +37,11 @@ MR_NUMBER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MERGE_MR_PATTERN = re.compile(r"merge branch .+ into .+", re.IGNORECASE)
+# Bitbucket PR patterns: (pull request #123), PR #123, or merged in #123
+BB_PR_NUMBER_PATTERN = re.compile(
+    r"(?:pull request #(?P<num_pr>\d+))|(?:pr #(?P<num_alt>\d+))|(?:merged in .+#(?P<num_merged>\d+))",
+    re.IGNORECASE,
+)
 
 
 def _typer_app() -> typer.Typer:
@@ -101,6 +107,9 @@ def generate(
     gitlab_token: Optional[str] = typer.Option(
         None, envvar="GITLAB_TOKEN", help="GitLab API token."
     ),
+    bitbucket_token: Optional[str] = typer.Option(
+        None, envvar="BITBUCKET_TOKEN", help="Bitbucket API token."
+    ),
     include_scopes: bool = typer.Option(
         True, "--include-scopes/--no-include-scopes", help="Show commit scopes."
     ),
@@ -154,6 +163,7 @@ def generate(
     # Detect platform and attach PR/MR numbers
     github_slug = git_repo.get_github_slug()
     gitlab_slug = git_repo.get_gitlab_slug()
+    bitbucket_slug = git_repo.get_bitbucket_slug()
     platform: Optional[str] = None
     if github_slug:
         platform = "github"
@@ -161,6 +171,9 @@ def generate(
     elif gitlab_slug:
         platform = "gitlab"
         _attach_mr_numbers(commits)
+    elif bitbucket_slug:
+        platform = "bitbucket"
+        _attach_bb_pr_numbers(commits)
     else:
         _attach_pr_numbers(commits)
 
@@ -168,6 +181,7 @@ def generate(
     commit_prs: Dict[str, List[PullRequestInfo]] = {}
     github_client: Optional[GitHubClient] = None
     gitlab_client: Optional[GitLabClient] = None
+    bitbucket_client: Optional[BitbucketClient] = None
     try:
         if not no_prs:
             if platform == "github" and github_slug:
@@ -180,11 +194,19 @@ def generate(
                 settings = GitLabSettings(project_path=gitlab_slug, token=gitlab_token)
                 gitlab_client = GitLabClient(settings)
                 pr_index, commit_prs = _enrich_with_merge_requests(gitlab_client, commits)
+            elif platform == "bitbucket" and bitbucket_slug:
+                settings = BitbucketSettings(
+                    workspace=bitbucket_slug[0], repo_slug=bitbucket_slug[1], token=bitbucket_token
+                )
+                bitbucket_client = BitbucketClient(settings)
+                pr_index, commit_prs = _enrich_with_bitbucket_pull_requests(bitbucket_client, commits)
     finally:
         if github_client:
             github_client.close()
         if gitlab_client:
             gitlab_client.close()
+        if bitbucket_client:
+            bitbucket_client.close()
 
     summarizer: Optional[BaseSummarizer] = None
     if use_llm:
@@ -228,7 +250,7 @@ def generate(
         pr_index=pr_index,
     )
 
-    compare_url = _compute_compare_url(github_slug, gitlab_slug, context)
+    compare_url = _compute_compare_url(github_slug, gitlab_slug, bitbucket_slug, context)
     if compare_url:
         changelog.metadata["compare_url"] = compare_url
 
@@ -570,12 +592,66 @@ def _enrich_with_merge_requests(
     return mr_index, commit_mrs
 
 
+def _attach_bb_pr_numbers(commits: Iterable[CommitInfo]) -> None:
+    """Attach Bitbucket PR numbers to commits."""
+    for commit in commits:
+        pr_number = (
+            _extract_bb_pr_number(commit.subject)
+            or _extract_bb_pr_number(commit.body)
+            or _extract_bb_pr_number(commit.message)
+        )
+        if pr_number:
+            commit.pr_number = pr_number
+
+
+def _extract_bb_pr_number(message: Optional[str]) -> Optional[int]:
+    """Extract Bitbucket PR number from a message."""
+    if not message:
+        return None
+    match = BB_PR_NUMBER_PATTERN.search(message)
+    if match:
+        for group_name in ("num_pr", "num_alt", "num_merged"):
+            value = match.group(group_name)
+            if value:
+                return int(value)
+    return None
+
+
+def _enrich_with_bitbucket_pull_requests(
+    client: BitbucketClient,
+    commits: Sequence[CommitInfo],
+) -> Tuple[Dict[int, PullRequestInfo], Dict[str, List[PullRequestInfo]]]:
+    """Enrich commits with Bitbucket pull request information."""
+    pr_index: Dict[int, PullRequestInfo] = {}
+    commit_prs: Dict[str, List[PullRequestInfo]] = {}
+
+    unique_ids = sorted(
+        {int(commit.pr_number) for commit in commits if commit.pr_number is not None}
+    )
+    for pr_id in unique_ids:
+        pr = client.get_pull_request(pr_id)
+        if pr:
+            pr_index[pr_id] = pr
+
+    for commit in commits:
+        if commit.pr_number and commit.pr_number in pr_index:
+            continue
+        prs = client.find_pull_requests_by_commit(commit.sha)
+        if prs:
+            commit_prs[commit.sha] = prs
+            if not commit.pr_number:
+                commit.pr_number = prs[0].number
+                pr_index.setdefault(prs[0].number, prs[0])
+    return pr_index, commit_prs
+
+
 def _compute_compare_url(
     github_slug: Optional[Tuple[str, str]],
     gitlab_slug: Optional[str],
+    bitbucket_slug: Optional[Tuple[str, str]],
     context: RangeContext,
 ) -> Optional[str]:
-    """Compute a comparison URL for GitHub or GitLab."""
+    """Compute a comparison URL for GitHub, GitLab, or Bitbucket."""
     if not context.since_ref or not context.until_ref:
         return None
     if github_slug:
@@ -583,6 +659,9 @@ def _compute_compare_url(
         return f"https://github.com/{owner}/{repo}/compare/{context.since_ref}...{context.until_ref}"
     if gitlab_slug:
         return f"https://gitlab.com/{gitlab_slug}/-/compare/{context.since_ref}...{context.until_ref}"
+    if bitbucket_slug:
+        workspace, repo_slug = bitbucket_slug
+        return f"https://bitbucket.org/{workspace}/{repo_slug}/branches/compare/{context.until_ref}%0D{context.since_ref}"
     return None
 
 

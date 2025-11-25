@@ -205,6 +205,25 @@ class GitRepository:
             path = path[:-4]
         return path
 
+    def get_bitbucket_slug(self, remote: str = "origin") -> Optional[Tuple[str, str]]:
+        """Extract (workspace, repo_slug) from a Bitbucket remote URL.
+
+        Supports bitbucket.org URLs.
+        SSH: git@bitbucket.org:workspace/repo.git
+        HTTPS: https://bitbucket.org/workspace/repo.git
+        """
+        url = self.get_remote_url(remote)
+        if not url:
+            return None
+        match = re.search(
+            r"bitbucket\.org[:/](?P<workspace>[^/]+)/(?P<repo>[^/.]+?)(?:\.git)?$",
+            url,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group("workspace"), match.group("repo")
+
     def is_dirty(self) -> bool:
         """Check if the repository has uncommitted changes."""
         if self._use_gitpython and self._repo is not None:
