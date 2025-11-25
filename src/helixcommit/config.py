@@ -22,6 +22,7 @@ class GeneratorConfig:
     use_llm: bool = False
     openai_model: str = "gpt-4o-mini"
     github_token: Optional[str] = None
+    gitlab_token: Optional[str] = None
     template_path: Optional[Path] = None
     sections_order: Sequence[str] = field(default_factory=list)
 

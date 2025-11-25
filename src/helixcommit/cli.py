@@ -19,6 +19,7 @@ from .formatters import markdown as markdown_formatter
 from .formatters import text as text_formatter
 from .git_client import CommitRange, GitRepository, TagInfo
 from .github_client import GitHubClient, GitHubSettings
+from .gitlab_client import GitLabClient, GitLabSettings
 from .models import Changelog, CommitInfo, PullRequestInfo
 from .summarizer import BaseSummarizer, PromptEngineeredSummarizer, SummaryRequest
 
@@ -29,6 +30,12 @@ PR_NUMBER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MERGE_PR_PATTERN = re.compile(r"merge pull request #(\d+)", re.IGNORECASE)
+# GitLab MR patterns: (!123), merge request !123, MR !123
+MR_NUMBER_PATTERN = re.compile(
+    r"(?:\(!(?P<num_paren>\d+)\))|(?:merge request !(?P<num_mr>\d+))|(?:mr !(?P<num_alt>\d+))",
+    re.IGNORECASE,
+)
+MERGE_MR_PATTERN = re.compile(r"merge branch .+ into .+", re.IGNORECASE)
 
 
 def _typer_app() -> typer.Typer:
@@ -91,6 +98,9 @@ def generate(
     github_token: Optional[str] = typer.Option(
         None, envvar="GITHUB_TOKEN", help="GitHub API token."
     ),
+    gitlab_token: Optional[str] = typer.Option(
+        None, envvar="GITLAB_TOKEN", help="GitLab API token."
+    ),
     include_scopes: bool = typer.Option(
         True, "--include-scopes/--no-include-scopes", help="Show commit scopes."
     ),
@@ -141,20 +151,40 @@ def generate(
         typer.echo(message)
         return
 
-    _attach_pr_numbers(commits)
+    # Detect platform and attach PR/MR numbers
+    github_slug = git_repo.get_github_slug()
+    gitlab_slug = git_repo.get_gitlab_slug()
+    platform: Optional[str] = None
+    if github_slug:
+        platform = "github"
+        _attach_pr_numbers(commits)
+    elif gitlab_slug:
+        platform = "gitlab"
+        _attach_mr_numbers(commits)
+    else:
+        _attach_pr_numbers(commits)
 
-    owner_repo = git_repo.get_github_slug()
     pr_index: Dict[int, PullRequestInfo] = {}
     commit_prs: Dict[str, List[PullRequestInfo]] = {}
     github_client: Optional[GitHubClient] = None
+    gitlab_client: Optional[GitLabClient] = None
     try:
-        if not no_prs and owner_repo:
-            settings = GitHubSettings(owner=owner_repo[0], repo=owner_repo[1], token=github_token)
-            github_client = GitHubClient(settings)
-            pr_index, commit_prs = _enrich_with_pull_requests(github_client, commits)
+        if not no_prs:
+            if platform == "github" and github_slug:
+                settings = GitHubSettings(
+                    owner=github_slug[0], repo=github_slug[1], token=github_token
+                )
+                github_client = GitHubClient(settings)
+                pr_index, commit_prs = _enrich_with_pull_requests(github_client, commits)
+            elif platform == "gitlab" and gitlab_slug:
+                settings = GitLabSettings(project_path=gitlab_slug, token=gitlab_token)
+                gitlab_client = GitLabClient(settings)
+                pr_index, commit_prs = _enrich_with_merge_requests(gitlab_client, commits)
     finally:
         if github_client:
             github_client.close()
+        if gitlab_client:
+            gitlab_client.close()
 
     summarizer: Optional[BaseSummarizer] = None
     if use_llm:
@@ -198,7 +228,7 @@ def generate(
         pr_index=pr_index,
     )
 
-    compare_url = _compute_compare_url(owner_repo, context)
+    compare_url = _compute_compare_url(github_slug, gitlab_slug, context)
     if compare_url:
         changelog.metadata["compare_url"] = compare_url
 
@@ -432,6 +462,7 @@ def _find_tag(tags: Sequence[TagInfo], name: Optional[str]) -> Optional[TagInfo]
 
 
 def _attach_pr_numbers(commits: Iterable[CommitInfo]) -> None:
+    """Attach GitHub PR numbers to commits."""
     for commit in commits:
         pr_number = (
             _extract_pr_number(commit.subject)
@@ -442,7 +473,20 @@ def _attach_pr_numbers(commits: Iterable[CommitInfo]) -> None:
             commit.pr_number = pr_number
 
 
+def _attach_mr_numbers(commits: Iterable[CommitInfo]) -> None:
+    """Attach GitLab MR numbers to commits."""
+    for commit in commits:
+        mr_number = (
+            _extract_mr_number(commit.subject)
+            or _extract_mr_number(commit.body)
+            or _extract_mr_number(commit.message)
+        )
+        if mr_number:
+            commit.pr_number = mr_number
+
+
 def _extract_pr_number(message: Optional[str]) -> Optional[int]:
+    """Extract GitHub PR number from a message."""
     if not message:
         return None
     match = PR_NUMBER_PATTERN.search(message)
@@ -457,10 +501,24 @@ def _extract_pr_number(message: Optional[str]) -> Optional[int]:
     return None
 
 
+def _extract_mr_number(message: Optional[str]) -> Optional[int]:
+    """Extract GitLab MR number from a message."""
+    if not message:
+        return None
+    match = MR_NUMBER_PATTERN.search(message)
+    if match:
+        for group_name in ("num_paren", "num_mr", "num_alt"):
+            value = match.group(group_name)
+            if value:
+                return int(value)
+    return None
+
+
 def _enrich_with_pull_requests(
     client: GitHubClient,
     commits: Sequence[CommitInfo],
 ) -> Tuple[Dict[int, PullRequestInfo], Dict[str, List[PullRequestInfo]]]:
+    """Enrich commits with GitHub pull request information."""
     pr_index: Dict[int, PullRequestInfo] = {}
     commit_prs: Dict[str, List[PullRequestInfo]] = {}
 
@@ -484,15 +542,48 @@ def _enrich_with_pull_requests(
     return pr_index, commit_prs
 
 
+def _enrich_with_merge_requests(
+    client: GitLabClient,
+    commits: Sequence[CommitInfo],
+) -> Tuple[Dict[int, PullRequestInfo], Dict[str, List[PullRequestInfo]]]:
+    """Enrich commits with GitLab merge request information."""
+    mr_index: Dict[int, PullRequestInfo] = {}
+    commit_mrs: Dict[str, List[PullRequestInfo]] = {}
+
+    unique_iids = sorted(
+        {int(commit.pr_number) for commit in commits if commit.pr_number is not None}
+    )
+    for iid in unique_iids:
+        mr = client.get_merge_request(iid)
+        if mr:
+            mr_index[iid] = mr
+
+    for commit in commits:
+        if commit.pr_number and commit.pr_number in mr_index:
+            continue
+        mrs = client.find_merge_requests_by_commit(commit.sha)
+        if mrs:
+            commit_mrs[commit.sha] = mrs
+            if not commit.pr_number:
+                commit.pr_number = mrs[0].number
+                mr_index.setdefault(mrs[0].number, mrs[0])
+    return mr_index, commit_mrs
+
+
 def _compute_compare_url(
-    owner_repo: Optional[Tuple[str, str]], context: RangeContext
+    github_slug: Optional[Tuple[str, str]],
+    gitlab_slug: Optional[str],
+    context: RangeContext,
 ) -> Optional[str]:
-    if not owner_repo:
-        return None
+    """Compute a comparison URL for GitHub or GitLab."""
     if not context.since_ref or not context.until_ref:
         return None
-    owner, repo = owner_repo
-    return f"https://github.com/{owner}/{repo}/compare/{context.since_ref}...{context.until_ref}"
+    if github_slug:
+        owner, repo = github_slug
+        return f"https://github.com/{owner}/{repo}/compare/{context.since_ref}...{context.until_ref}"
+    if gitlab_slug:
+        return f"https://gitlab.com/{gitlab_slug}/-/compare/{context.since_ref}...{context.until_ref}"
+    return None
 
 
 def _render_output(changelog: Changelog, output_format: OutputFormat) -> str:

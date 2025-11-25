@@ -179,6 +179,28 @@ class GitRepository:
             return None
         return match.group("owner"), match.group("repo")
 
+    def get_gitlab_slug(self, remote: str = "origin") -> Optional[str]:
+        """Extract project path from a GitLab remote URL.
+
+        Supports gitlab.com and self-hosted GitLab instances.
+        Returns the full project path (e.g., "group/subgroup/project").
+        """
+        url = self.get_remote_url(remote)
+        if not url:
+            return None
+        # Match gitlab.com or common self-hosted GitLab patterns
+        # SSH: git@gitlab.com:group/project.git
+        # HTTPS: https://gitlab.com/group/project.git
+        # Self-hosted: git@gitlab.example.com:group/project.git
+        match = re.search(
+            r"(?:gitlab[^/]*[:/])(?P<path>.+?)(?:\\.git)?$",
+            url,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group("path")
+
     def is_dirty(self) -> bool:
         """Check if the repository has uncommitted changes."""
         if self._use_gitpython and self._repo is not None:
