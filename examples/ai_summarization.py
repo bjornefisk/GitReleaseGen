@@ -26,7 +26,7 @@ def main():
         sys.exit(1)
 
     print("🤖 Generating AI-powered release notes...")
-    print("   Model: meta-llama/llama-3.3-8b-instruct:free")
+    print("   Model: meta-llama/llama-3.1-8b-instruct:free")
     print("   This may take a moment...\n")
 
     result = subprocess.run(
@@ -38,7 +38,7 @@ def main():
             "--llm-provider",
             "openrouter",
             "--openrouter-model",
-            "meta-llama/llama-3.3-8b-instruct:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
             "--format",
             "markdown",
             "--out",

@@ -83,7 +83,7 @@ def generate(
         None, envvar="OPENAI_API_KEY", help="OpenAI API key."
     ),
     openrouter_model: str = typer.Option(
-        "meta-llama/llama-3.3-8b-instruct:free", help="OpenRouter model."
+        "meta-llama/llama-3.3-70b-instruct:free", help="OpenRouter model."
     ),
     openrouter_api_key: Optional[str] = typer.Option(
         None, envvar="OPENROUTER_API_KEY", help="OpenRouter API key."
@@ -300,7 +300,7 @@ def generate_commit(
         None, envvar="OPENAI_API_KEY", help="OpenAI API key."
     ),
     openrouter_model: str = typer.Option(
-        "meta-llama/llama-3.3-8b-instruct:free", help="OpenRouter model."
+        "meta-llama/llama-3.3-70b-instruct:free", help="OpenRouter model."
     ),
     openrouter_api_key: Optional[str] = typer.Option(
         None, envvar="OPENROUTER_API_KEY", help="OpenRouter API key."
