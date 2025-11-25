@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 try:  # pragma: no cover - optional dependency guard
     from openai import OpenAI
 except ImportError:  # pragma: no cover - optional dependency guard
     OpenAI = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    # Precise type for messages passed to chat.completions.create
+    from openai.types.chat import ChatCompletionMessageParam
+else:  # Fallback so runtime doesn't require the types module
+    ChatCompletionMessageParam = Dict[str, Any]  # type: ignore[misc,assignment]
 
 
 class CommitGenerator:
@@ -29,7 +35,8 @@ class CommitGenerator:
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
-        self.history: List[Dict[str, Any]] = []
+        # Use the official OpenAI message param type so type checkers match the SDK
+        self.history: List[ChatCompletionMessageParam] = []
 
     def generate(self, diff: str) -> str:
         """Start the generation process with a diff."""

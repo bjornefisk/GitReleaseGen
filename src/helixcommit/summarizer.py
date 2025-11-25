@@ -23,12 +23,17 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, TYPE_CHECKING
 
 try:  # pragma: no cover - optional dependency guard
     from openai import OpenAI
 except Exception:  # pragma: no cover - optional dependency guard
     OpenAI = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from openai.types.chat import ChatCompletionMessageParam
+else:
+    ChatCompletionMessageParam = Dict[str, object]  # type: ignore[misc,assignment]
 
 
 @dataclass(slots=True)
@@ -603,7 +608,9 @@ class PromptEngineeredSummarizer(BaseSummarizer):
 
     # -- Chat wrapper ---------------------------------------------------------------
     def _chat(
-        self, messages: List[Dict[str, str]], response_format: Optional[Dict[str, str]]
+        self,
+        messages: List[ChatCompletionMessageParam],
+        response_format: Optional[Dict[str, str]],
     ) -> Optional[str]:
         completion = self.client.chat.completions.create(
             model=self.model,

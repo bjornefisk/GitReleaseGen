@@ -77,13 +77,13 @@ def generate(
     ),
     out: Optional[Path] = typer.Option(None, help="Output file path."),
     use_llm: bool = typer.Option(False, help="Use AI summaries."),
-    llm_provider: str = typer.Option("openai", help="AI provider (openai/openrouter)."),
+    llm_provider: str = typer.Option("openrouter", help="AI provider (openai/openrouter)."),
     openai_model: str = typer.Option("gpt-4o-mini", help="OpenAI model."),
     openai_api_key: Optional[str] = typer.Option(
         None, envvar="OPENAI_API_KEY", help="OpenAI API key."
     ),
     openrouter_model: str = typer.Option(
-        "meta-llama/llama-3.3-70b-instruct:free", help="OpenRouter model."
+        "x-ai/grok-4.1-fast:free", help="OpenRouter model."
     ),
     openrouter_api_key: Optional[str] = typer.Option(
         None, envvar="OPENROUTER_API_KEY", help="OpenRouter API key."
@@ -187,11 +187,8 @@ def generate(
     )
 
     version_name = context.until_tag.name if context.until_tag else "Unreleased"
-    release_date = (
-        context.until_tag.date
-        if context.until_tag and context.until_tag.date
-        else datetime.now(timezone.utc)
-    )
+    tag_date = getattr(context.until_tag, "date", None) if context.until_tag else None
+    release_date = tag_date if tag_date else datetime.now(timezone.utc)
 
     changelog = builder.build(
         version=version_name,
@@ -300,7 +297,7 @@ def generate_commit(
         None, envvar="OPENAI_API_KEY", help="OpenAI API key."
     ),
     openrouter_model: str = typer.Option(
-        "meta-llama/llama-3.3-70b-instruct:free", help="OpenRouter model."
+        "x-ai/grok-4.1-fast:free", help="OpenRouter model."
     ),
     openrouter_api_key: Optional[str] = typer.Option(
         None, envvar="OPENROUTER_API_KEY", help="OpenRouter API key."

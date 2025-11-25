@@ -95,8 +95,10 @@ class GitRepository:
                 diffs = parent.diff(commit, create_patch=True) if parent else commit.diff(None, create_patch=True)
                 
                 full_diff = "\n".join(
-                    d.diff.decode("utf-8", errors="replace") 
-                    for d in diffs 
+                    (d.diff.tobytes().decode("utf-8", errors="replace") if isinstance(d.diff, memoryview)
+                     else d.diff.decode("utf-8", errors="replace") if isinstance(d.diff, (bytes, bytearray))
+                     else str(d.diff))
+                    for d in diffs
                     if d.diff
                 )
                 return full_diff[:max_chars]
@@ -237,7 +239,12 @@ class GitRepository:
                 and len(raw_commit.parents) > 1
             ):
                 continue
-            subject, body = self._split_message(raw_commit.message)
+            message = raw_commit.message
+            if isinstance(message, bytes):
+                message = message.decode("utf-8", errors="replace")
+            elif isinstance(message, (bytearray, memoryview)):
+                message = bytes(message).decode("utf-8", errors="replace")
+            subject, body = self._split_message(message)
             authored_date = datetime.fromtimestamp(raw_commit.authored_date, tz=UTC)
             committed_date = datetime.fromtimestamp(raw_commit.committed_date, tz=UTC)
             
@@ -249,8 +256,8 @@ class GitRepository:
                 sha=raw_commit.hexsha,
                 subject=subject,
                 body=body,
-                author_name=raw_commit.author.name,
-                author_email=raw_commit.author.email,
+                author_name=raw_commit.author.name or "",
+                author_email=raw_commit.author.email or "",
                 authored_date=authored_date,
                 committed_date=committed_date,
                 is_merge=len(raw_commit.parents) > 1,
