@@ -19,6 +19,7 @@ from .formatters import html as html_formatter
 from .formatters import json as json_formatter
 from .formatters import markdown as markdown_formatter
 from .formatters import text as text_formatter
+from .formatters import yaml as yaml_formatter
 from .bitbucket_client import BitbucketClient, BitbucketSettings
 from .git_client import CommitRange, GitRepository, TagInfo
 from .github_client import GitHubClient, GitHubSettings
@@ -58,6 +59,7 @@ class OutputFormat(str, Enum):
     html = "html"
     text = "text"
     json = "json"
+    yaml = "yaml"
 
 
 class RagBackend(str, Enum):
@@ -722,6 +724,8 @@ def _render_output(changelog: Changelog, output_format: OutputFormat) -> str:
         return text_formatter.render_text(changelog)
     if output_format is OutputFormat.json:
         return json_formatter.render_json(changelog)
+    if output_format is OutputFormat.yaml:
+        return yaml_formatter.render_yaml(changelog)
     raise typer.BadParameter(f"Unsupported format: {output_format}")
 
 
