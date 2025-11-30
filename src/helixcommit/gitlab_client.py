@@ -133,11 +133,46 @@ class GitLabRateLimitError(GitLabApiError):
     """Raised when the GitLab API rate limit is exceeded."""
 
     def __init__(self, method: str, url: str, reset_at: Optional[int]) -> None:
-        message = "Rate limit exceeded"
-        if reset_at:
-            message = f"{message}; resets at {reset_at}"
+        message = self._build_message(reset_at)
         super().__init__(method, url, 429, message)
         self.reset_at = reset_at
+
+    @staticmethod
+    def _build_message(reset_at: Optional[int]) -> str:
+        base = "GitLab API rate limit exceeded."
+        if reset_at:
+            try:
+                reset_time = datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                time_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+                wait_seconds = max(0, reset_at - int(time.time()))
+                wait_minutes = wait_seconds // 60
+                if wait_minutes > 0:
+                    base = f"{base} Resets at {time_str} (in ~{wait_minutes} minutes)."
+                else:
+                    base = f"{base} Resets at {time_str} (in ~{wait_seconds} seconds)."
+            except (ValueError, OSError):
+                base = f"{base} Resets at epoch {reset_at}."
+        return (
+            f"{base}\n"
+            "Tip: Authenticate with GITLAB_TOKEN to increase rate limits."
+        )
+
+
+class GitLabAuthError(GitLabApiError):
+    """Raised when GitLab API authentication fails."""
+
+    def __init__(self, method: str, url: str, message: str | None = None) -> None:
+        auth_message = (
+            "GitLab authentication failed. "
+            "Please check your GITLAB_TOKEN is valid and has the required permissions.\n"
+            "To fix this:\n"
+            "  1. Verify your token at https://gitlab.com/-/profile/personal_access_tokens\n"
+            "  2. Ensure the token has 'read_api' scope (or 'api' for full access)\n"
+            "  3. Set the token via: export GITLAB_TOKEN='your-token'"
+        )
+        if message:
+            auth_message = f"{auth_message}\n\nAPI response: {message}"
+        super().__init__(method, url, 401, auth_message)
 
 
 @dataclass(slots=True)
@@ -399,6 +434,12 @@ class GitLabClient:
                     self._sleep(delay)
                 continue
 
+            # Handle authentication errors with a helpful message
+            if response.status_code == 401:
+                message = _extract_error_message(response)
+                response.close()
+                raise GitLabAuthError(method, url, message)
+
             message = _extract_error_message(response)
             status_code = response.status_code
             response.close()
@@ -485,6 +526,7 @@ def _extract_error_message(response: requests.Response) -> str:
 
 __all__ = [
     "GitLabApiError",
+    "GitLabAuthError",
     "GitLabClient",
     "GitLabRateLimitError",
     "GitLabSettings",

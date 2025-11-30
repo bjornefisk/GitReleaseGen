@@ -83,4 +83,7 @@ def test_generate_commit_missing_api_key(mock_git_repo):
     with patch.dict("os.environ", {}, clear=True):
         result = runner.invoke(app, ["generate-commit", "--llm-provider", "openai"])
         assert result.exit_code == 1
-        assert "Missing API key for openai" in result.stdout
+        # Error is output to stderr, check the combined output
+        output = result.output or result.stdout
+        assert "Missing API key for 'openai' provider" in output
+        assert "OPENAI_API_KEY" in output

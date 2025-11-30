@@ -104,6 +104,23 @@ def _retry_after_seconds(response: requests.Response) -> Optional[float]:
     return _parse_retry_after(header)
 
 
+def _rate_limit_reset_delay(response: requests.Response) -> Optional[float]:
+    """Extract rate limit reset delay from Bitbucket headers.
+
+    Bitbucket Cloud uses X-Ratelimit-Reset header containing the epoch time
+    when the rate limit resets.
+    """
+    reset_header = response.headers.get("X-Ratelimit-Reset")
+    if not reset_header:
+        return None
+    try:
+        reset_epoch = int(reset_header)
+    except ValueError:
+        return None
+    delay = reset_epoch - int(time.time())
+    return max(0.0, float(delay))
+
+
 class BitbucketApiError(RuntimeError):
     """Raised when the Bitbucket API responds with an error."""
 
@@ -120,11 +137,46 @@ class BitbucketRateLimitError(BitbucketApiError):
     """Raised when the Bitbucket API rate limit is exceeded."""
 
     def __init__(self, method: str, url: str, reset_at: Optional[int]) -> None:
-        message = "Rate limit exceeded"
-        if reset_at:
-            message = f"{message}; resets at {reset_at}"
+        message = self._build_message(reset_at)
         super().__init__(method, url, 429, message)
         self.reset_at = reset_at
+
+    @staticmethod
+    def _build_message(reset_at: Optional[int]) -> str:
+        base = "Bitbucket API rate limit exceeded."
+        if reset_at:
+            try:
+                reset_time = datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                time_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+                wait_seconds = max(0, reset_at - int(time.time()))
+                wait_minutes = wait_seconds // 60
+                if wait_minutes > 0:
+                    base = f"{base} Resets at {time_str} (in ~{wait_minutes} minutes)."
+                else:
+                    base = f"{base} Resets at {time_str} (in ~{wait_seconds} seconds)."
+            except (ValueError, OSError):
+                base = f"{base} Resets at epoch {reset_at}."
+        return (
+            f"{base}\n"
+            "Tip: Authenticate with BITBUCKET_TOKEN to get higher rate limits."
+        )
+
+
+class BitbucketAuthError(BitbucketApiError):
+    """Raised when Bitbucket API authentication fails."""
+
+    def __init__(self, method: str, url: str, message: str | None = None) -> None:
+        auth_message = (
+            "Bitbucket authentication failed. "
+            "Please check your BITBUCKET_TOKEN is valid and has the required permissions.\n"
+            "To fix this:\n"
+            "  1. Create an App Password at https://bitbucket.org/account/settings/app-passwords/\n"
+            "  2. Ensure the token has 'Repositories: Read' permission\n"
+            "  3. Set the token via: export BITBUCKET_TOKEN='your-token'"
+        )
+        if message:
+            auth_message = f"{auth_message}\n\nAPI response: {message}"
+        super().__init__(method, url, 401, auth_message)
 
 
 @dataclass(slots=True)
@@ -308,19 +360,33 @@ class BitbucketClient:
         return status_code >= 500 or status_code == 408
 
     def _is_rate_limit_response(self, response: requests.Response) -> bool:
-        return response.status_code == 429
+        if response.status_code == 429:
+            return True
+        # Bitbucket may also return 403 when rate limit is exhausted
+        if response.status_code == 403 and response.headers.get("X-Ratelimit-Remaining") == "0":
+            return True
+        return False
 
     def _rate_limit_delay(self, response: requests.Response, attempt: int) -> float:
         retry_after = _retry_after_seconds(response)
         if retry_after is not None:
             return min(self._backoff_cap, retry_after) if self._backoff_cap > 0 else retry_after
+        reset_delay = _rate_limit_reset_delay(response)
+        if reset_delay is not None:
+            return min(self._backoff_cap, reset_delay) if self._backoff_cap > 0 else reset_delay
         return self._compute_backoff(attempt)
 
     def _build_rate_limit_error(
         self, method: str, url: str, response: requests.Response
     ) -> BitbucketRateLimitError:
+        # Try Retry-After header first
         retry_after = response.headers.get("Retry-After")
-        reset_at = int(retry_after) if retry_after and retry_after.isdigit() else None
+        if retry_after and retry_after.isdigit():
+            reset_at = int(time.time()) + int(retry_after)
+            return BitbucketRateLimitError(method, url, reset_at)
+        # Fall back to X-Ratelimit-Reset header
+        reset_hdr = response.headers.get("X-Ratelimit-Reset")
+        reset_at = int(reset_hdr) if reset_hdr and reset_hdr.isdigit() else None
         return BitbucketRateLimitError(method, url, reset_at)
 
     # ------------------------------------------------------------------
@@ -380,6 +446,12 @@ class BitbucketClient:
                 if delay > 0:
                     self._sleep(delay)
                 continue
+
+            # Handle authentication errors with a helpful message
+            if response.status_code == 401:
+                message = _extract_error_message(response)
+                response.close()
+                raise BitbucketAuthError(method, url, message)
 
             message = _extract_error_message(response)
             status_code = response.status_code
@@ -478,6 +550,7 @@ def _extract_error_message(response: requests.Response) -> str:
 
 __all__ = [
     "BitbucketApiError",
+    "BitbucketAuthError",
     "BitbucketClient",
     "BitbucketRateLimitError",
     "BitbucketSettings",

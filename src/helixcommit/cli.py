@@ -47,6 +47,56 @@ BB_PR_NUMBER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Environment variable names for API keys
+API_KEY_ENV_VARS = {
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+class MissingApiKeyError(Exception):
+    """Raised when a required API key is not provided."""
+
+    def __init__(self, provider: str, env_var: str) -> None:
+        self.provider = provider
+        self.env_var = env_var
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        return (
+            f"Missing API key for '{self.provider}' provider.\n\n"
+            f"To fix this, either:\n"
+            f"  1. Set the {self.env_var} environment variable:\n"
+            f"     export {self.env_var}='your-api-key'\n\n"
+            f"  2. Pass it directly via the command line:\n"
+            f"     --{self.provider.lower()}-api-key 'your-api-key'\n\n"
+            f"  3. Add it to your config file (.helixcommit.toml or .helixcommit.yaml)"
+        )
+
+
+def _validate_api_key(
+    provider: str,
+    api_key: Optional[str],
+) -> str:
+    """Validate that an API key is provided for the given provider.
+
+    Args:
+        provider: The LLM provider name (openai, openrouter).
+        api_key: The API key value (may be None).
+
+    Returns:
+        The API key if valid.
+
+    Raises:
+        MissingApiKeyError: If the API key is not provided.
+    """
+    if api_key:
+        return api_key
+
+    provider_lower = provider.lower()
+    env_var = API_KEY_ENV_VARS.get(provider_lower, f"{provider_lower.upper()}_API_KEY")
+    raise MissingApiKeyError(provider_lower, env_var)
+
 
 def _typer_app() -> typer.Typer:
     return typer.Typer(help="Generate release notes from Git repositories.", no_args_is_help=True)
@@ -271,6 +321,16 @@ def generate(
 
     summarizer: Optional[BaseSummarizer] = None
     if use_llm:
+        # Validate API key before attempting to use LLM
+        try:
+            if llm_provider.lower() == "openrouter":
+                validated_key = _validate_api_key("openrouter", openrouter_api_key)
+            else:
+                validated_key = _validate_api_key("openai", openai_api_key)
+        except MissingApiKeyError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from None
+
         cache_path = summary_cache or (repo / DEFAULT_SUMMARY_CACHE)
         rag_backend_value = rag_backend.value
         summarizer_kwargs = {
@@ -281,14 +341,14 @@ def generate(
         }
         if llm_provider.lower() == "openrouter":
             summarizer = PromptEngineeredSummarizer(
-                api_key=openrouter_api_key,
+                api_key=validated_key,
                 model=openrouter_model,
                 base_url="https://openrouter.ai/api/v1",
                 **summarizer_kwargs,
             )
         else:
             summarizer = PromptEngineeredSummarizer(
-                api_key=openai_api_key,
+                api_key=validated_key,
                 model=openai_model,
                 **summarizer_kwargs,
             )
@@ -459,16 +519,18 @@ def generate_commit(
         typer.echo("No staged changes found. Stage some changes with 'git add' first.")
         raise typer.Exit(1)
 
-    # 3. Setup AI
-    api_key = openrouter_api_key if llm_provider == "openrouter" else openai_api_key
+    # 3. Setup AI - validate API key
+    try:
+        api_key = _validate_api_key(
+            llm_provider,
+            openrouter_api_key if llm_provider == "openrouter" else openai_api_key,
+        )
+    except MissingApiKeyError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+
     model = openrouter_model if llm_provider == "openrouter" else openai_model
     base_url = "https://openrouter.ai/api/v1" if llm_provider == "openrouter" else None
-
-    if not api_key:
-        typer.echo(
-            f"Missing API key for {llm_provider}. Set {llm_provider.upper()}_API_KEY."
-        )
-        raise typer.Exit(1)
 
     try:
         generator = CommitGenerator(api_key=api_key, model=model, base_url=base_url)

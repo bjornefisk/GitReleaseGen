@@ -6,14 +6,23 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+# Header pattern for conventional commits
+# - Type: starts with letter, can contain letters, digits, hyphens
+# - Scope: optional, in parentheses, can be empty or contain any chars except )
+# - Breaking: optional ! before colon
+# - Subject: can be empty (just whitespace after colon)
 HEADER_PATTERN = re.compile(
     r"^(?P<type>[A-Za-z][A-Za-z0-9-]*)"
-    r"(?:\((?P<scope>[^)]+)\))?"
-    r"(?P<breaking>!)?:\s*(?P<subject>.+)$"
+    r"(?:\((?P<scope>[^)]*)\))?"
+    r"(?P<breaking>!)?:\s*(?P<subject>.*)$"
 )
 
+# Footer pattern - handles:
+# - "Token: value" format
+# - "Token #hash" format (e.g., "Fixes #123")
+# - "Token:" with optional/empty value
 FOOTER_PATTERN = re.compile(
-    r"^(?P<token>[A-Za-z][A-Za-z0-9- ]*)(?::\s*(?P<value>.+)|\s+#(?P<hash>.+))$"
+    r"^(?P<token>[A-Za-z][A-Za-z0-9- ]*)(?::\s*(?P<value>.*)|\s+#(?P<hash>.+))$"
 )
 
 BREAKING_BODY_PATTERN = re.compile(
@@ -78,17 +87,42 @@ class ParsedCommitMessage:
 
 
 def parse_commit_message(message: str) -> ParsedCommitMessage:
-    """Parse a commit message into Conventional Commit components."""
+    """Parse a commit message into Conventional Commit components.
 
-    normalized = (message or "").replace("\r\n", "\n").strip("\n")
-    lines = normalized.split("\n") if normalized else []
+    Handles edge cases:
+    - Empty or whitespace-only messages
+    - Empty scope (e.g., "feat(): subject" -> scope is None)
+    - Empty subject (e.g., "feat:" -> subject is "")
+    - Unicode characters in body/footers
+    """
+    # Normalize line endings and strip leading/trailing newlines
+    normalized = (message or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        # Handle empty or whitespace-only messages
+        return ParsedCommitMessage(
+            type=None,
+            scope=None,
+            subject="",
+            description=None,
+            body="",
+            footers={},
+            breaking=False,
+            breaking_descriptions=[],
+            is_conventional=False,
+        )
+
+    lines = normalized.split("\n")
     header = lines[0] if lines else ""
     body_lines = lines[1:] if len(lines) > 1 else []
 
     match = HEADER_PATTERN.match(header.strip())
     raw_type = match.group("type") if match else None
-    scope = match.group("scope") if match else None
-    subject = match.group("subject").strip() if match else header.strip()
+    # Treat empty scope as None (e.g., "feat(): subject" -> scope is None)
+    raw_scope = match.group("scope") if match else None
+    scope = raw_scope.strip() if raw_scope and raw_scope.strip() else None
+    # Handle empty subject gracefully
+    raw_subject = match.group("subject") if match else header.strip()
+    subject = raw_subject.strip() if raw_subject else ""
     type_name = normalize_type(raw_type)
     breaking = bool(match and match.group("breaking"))
     is_conventional = match is not None and type_name is not None
@@ -184,6 +218,13 @@ def _split_body_and_footers(lines: List[str]) -> Tuple[List[str], List[str]]:
 
 
 def _parse_footers(lines: List[str]) -> Dict[str, List[str]]:
+    """Parse footer lines into a dictionary.
+
+    Handles edge cases:
+    - Empty footer values (e.g., "Token:")
+    - Multi-line footer values (continuation lines starting with space/tab)
+    - Hash-style references (e.g., "Fixes #123")
+    """
     footers: Dict[str, List[str]] = {}
     current_token: Optional[str] = None
     for line in lines:
@@ -193,13 +234,22 @@ def _parse_footers(lines: List[str]) -> Dict[str, List[str]]:
         match = FOOTER_PATTERN.match(line.strip())
         if match:
             token = match.group("token").strip()
-            value = match.group("value") or f"#{match.group('hash').strip()}"
-            value = value.strip()
+            # Handle both "Token: value" and "Token #hash" formats
+            hash_value = match.group("hash")
+            raw_value = match.group("value")
+            if hash_value is not None:
+                value = f"#{hash_value.strip()}"
+            elif raw_value is not None:
+                value = raw_value.strip()
+            else:
+                value = ""
             current_token = token
             footers.setdefault(token, []).append(value)
             continue
+        # Handle continuation lines for multi-line footer values
         if current_token and line.startswith((" ", "\t")):
-            footers[current_token][-1] += f"\n{line.strip()}"
+            if footers[current_token]:
+                footers[current_token][-1] += f"\n{line.strip()}"
         else:
             current_token = None
     return footers
