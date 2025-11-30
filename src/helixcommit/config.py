@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import yaml
 
@@ -15,6 +17,36 @@ else:
     import tomli as tomllib
 
 DEFAULT_TEMPLATE_DIR = Path(__file__).with_suffix("").parent / "formatters"
+
+# Pattern for environment variable expansion: ${VAR} or ${VAR:-default}
+ENV_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+
+
+def expand_env_vars(value: str) -> str:
+    """Expand environment variables in a string value.
+
+    Supports two syntaxes:
+    - ${VAR} - replaced with the value of VAR, or kept as-is if not set
+    - ${VAR:-default} - replaced with the value of VAR, or 'default' if not set
+
+    Args:
+        value: The string value potentially containing env var references.
+
+    Returns:
+        The string with environment variables expanded.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        default = match.group(2)
+        if var_name in os.environ:
+            return os.environ[var_name]
+        if default is not None:
+            return default
+        # Keep the original reference if var not set and no default
+        return match.group(0)
+
+    return ENV_VAR_PATTERN.sub(replace, value)
 
 # Config file names in order of precedence
 CONFIG_FILES = [".helixcommit.toml", ".helixcommit.yaml"]
@@ -166,8 +198,33 @@ class ConfigLoader:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
 
+    def _expand_config_data(
+        self, data: Union[Dict[str, Any], List[Any], str, Any]
+    ) -> Union[Dict[str, Any], List[Any], str, Any]:
+        """Recursively expand environment variables in config data.
+
+        Processes dictionaries, lists, and strings, expanding any ${VAR}
+        or ${VAR:-default} patterns found in string values.
+
+        Args:
+            data: The config data to process.
+
+        Returns:
+            The config data with environment variables expanded.
+        """
+        if isinstance(data, dict):
+            return {key: self._expand_config_data(value) for key, value in data.items()}
+        if isinstance(data, list):
+            return [self._expand_config_data(item) for item in data]
+        if isinstance(data, str):
+            return expand_env_vars(data)
+        return data
+
     def _parse_config(self, data: Dict[str, Any], source_path: Path) -> FileConfig:
         """Parse raw config data into a FileConfig object."""
+        # Expand environment variables in all string values
+        data = self._expand_config_data(data)
+
         generate_data = data.get("generate", {})
         ai_data = data.get("ai", {})
         templates_data = data.get("templates", {})
@@ -239,6 +296,8 @@ def load_config(repo_path: Optional[Path] = None) -> FileConfig:
 
 __all__ = [
     "DEFAULT_TEMPLATE_DIR",
+    "ENV_VAR_PATTERN",
+    "expand_env_vars",
     "GeneratorConfig",
     "GenerateConfig",
     "AIConfig",

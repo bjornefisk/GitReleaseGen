@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from helixcommit.config import (
     GenerateConfig,
     GeneratorConfig,
     TemplateConfig,
+    expand_env_vars,
     load_config,
 )
 
@@ -421,3 +423,165 @@ markdown = "{abs_path}"
     config = loader.load()
 
     assert config.templates.markdown == abs_path.resolve()
+
+
+# --- Environment Variable Expansion tests ---
+
+
+def test_expand_env_vars_basic(monkeypatch):
+    """expand_env_vars expands basic ${VAR} syntax."""
+    monkeypatch.setenv("TEST_VAR", "hello")
+    assert expand_env_vars("${TEST_VAR}") == "hello"
+    assert expand_env_vars("prefix-${TEST_VAR}-suffix") == "prefix-hello-suffix"
+
+
+def test_expand_env_vars_with_default(monkeypatch):
+    """expand_env_vars supports ${VAR:-default} syntax."""
+    # When var is set, use its value
+    monkeypatch.setenv("TEST_VAR", "actual")
+    assert expand_env_vars("${TEST_VAR:-fallback}") == "actual"
+
+    # When var is not set, use default
+    monkeypatch.delenv("TEST_VAR", raising=False)
+    assert expand_env_vars("${TEST_VAR:-fallback}") == "fallback"
+
+
+def test_expand_env_vars_empty_default(monkeypatch):
+    """expand_env_vars handles empty default values."""
+    monkeypatch.delenv("MISSING_VAR", raising=False)
+    assert expand_env_vars("${MISSING_VAR:-}") == ""
+
+
+def test_expand_env_vars_missing_var_no_default(monkeypatch):
+    """expand_env_vars keeps original reference if var not set and no default."""
+    monkeypatch.delenv("UNDEFINED_VAR", raising=False)
+    assert expand_env_vars("${UNDEFINED_VAR}") == "${UNDEFINED_VAR}"
+
+
+def test_expand_env_vars_multiple(monkeypatch):
+    """expand_env_vars expands multiple variables in one string."""
+    monkeypatch.setenv("VAR1", "one")
+    monkeypatch.setenv("VAR2", "two")
+    assert expand_env_vars("${VAR1} and ${VAR2}") == "one and two"
+
+
+def test_expand_env_vars_no_vars():
+    """expand_env_vars returns string unchanged if no env vars."""
+    assert expand_env_vars("plain string") == "plain string"
+    assert expand_env_vars("") == ""
+
+
+def test_config_loader_env_var_expansion_toml(tmp_path, monkeypatch):
+    """ConfigLoader expands env vars in TOML config values."""
+    monkeypatch.setenv("HELIX_FORMAT", "html")
+    monkeypatch.setenv("HELIX_DOMAIN", "conservation")
+
+    config_file = tmp_path / ".helixcommit.toml"
+    config_file.write_text("""
+[generate]
+format = "${HELIX_FORMAT}"
+
+[ai]
+enabled = true
+domain_scope = "${HELIX_DOMAIN}"
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.generate.format == "html"
+    assert config.ai.domain_scope == "conservation"
+
+
+def test_config_loader_env_var_expansion_yaml(tmp_path, monkeypatch):
+    """ConfigLoader expands env vars in YAML config values."""
+    monkeypatch.setenv("HELIX_PROVIDER", "openai")
+    monkeypatch.setenv("HELIX_MODEL", "gpt-4o")
+
+    config_file = tmp_path / ".helixcommit.yaml"
+    config_file.write_text("""
+ai:
+  enabled: true
+  provider: "${HELIX_PROVIDER}"
+  openai_model: "${HELIX_MODEL}"
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.ai.provider == "openai"
+    assert config.ai.openai_model == "gpt-4o"
+
+
+def test_config_loader_env_var_with_default(tmp_path, monkeypatch):
+    """ConfigLoader uses default values when env vars not set."""
+    # Ensure variable is not set
+    monkeypatch.delenv("UNDEFINED_MODEL", raising=False)
+
+    config_file = tmp_path / ".helixcommit.toml"
+    config_file.write_text("""
+[ai]
+enabled = true
+openai_model = "${UNDEFINED_MODEL:-gpt-4o-mini}"
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.ai.openai_model == "gpt-4o-mini"
+
+
+def test_config_loader_env_var_in_list(tmp_path, monkeypatch):
+    """ConfigLoader expands env vars in list values."""
+    monkeypatch.setenv("ROLE1", "Product Manager")
+    monkeypatch.setenv("ROLE2", "Tech Lead")
+
+    config_file = tmp_path / ".helixcommit.toml"
+    config_file.write_text("""
+[ai]
+enabled = true
+expert_roles = ["${ROLE1}", "${ROLE2}", "QA Engineer"]
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.ai.expert_roles == ["Product Manager", "Tech Lead", "QA Engineer"]
+
+
+def test_config_loader_env_var_in_template_path(tmp_path, monkeypatch):
+    """ConfigLoader expands env vars in template paths."""
+    templates_dir = tmp_path / "custom-templates"
+    templates_dir.mkdir()
+    md_template = templates_dir / "release.md.j2"
+    md_template.write_text("# Release Notes")
+
+    monkeypatch.setenv("TEMPLATE_DIR", "custom-templates")
+
+    config_file = tmp_path / ".helixcommit.toml"
+    config_file.write_text("""
+[templates]
+markdown = "${TEMPLATE_DIR}/release.md.j2"
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.templates.markdown == md_template.resolve()
+
+
+def test_config_loader_mixed_env_vars_and_literals(tmp_path, monkeypatch):
+    """ConfigLoader handles mix of env vars and literal values."""
+    monkeypatch.setenv("APP_NAME", "myapp")
+
+    config_file = tmp_path / ".helixcommit.yaml"
+    config_file.write_text("""
+ai:
+  enabled: true
+  domain_scope: "Release notes for ${APP_NAME} project"
+""")
+
+    loader = ConfigLoader(tmp_path)
+    config = loader.load()
+
+    assert config.ai.domain_scope == "Release notes for myapp project"
