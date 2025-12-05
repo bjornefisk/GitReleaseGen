@@ -29,6 +29,9 @@ from .github_client import GitHubClient, GitHubSettings
 from .gitlab_client import GitLabClient, GitLabSettings
 from .models import Changelog, CommitInfo, PullRequestInfo
 from .summarizer import BaseSummarizer, PromptEngineeredSummarizer, SummaryRequest
+from .ui import get_console, set_theme
+from .ui.panels import error_panel, success_panel, info_panel
+from .ui.spinners import ai_spinner, TaskProgress
 
 APP_NAME = "HelixCommit"
 DEFAULT_SUMMARY_CACHE = Path(".helixcommit-cache/summaries.json")
@@ -167,8 +170,19 @@ def _parse_date(value: str) -> datetime:
         ) from e
 
 
+class ThemeChoice(str, Enum):
+    """Theme choices for the CLI."""
+    dark = "dark"
+    light = "light"
+    auto = "auto"
+
+
 def _typer_app() -> typer.Typer:
-    return typer.Typer(help="Generate release notes from Git repositories.", no_args_is_help=True)
+    return typer.Typer(
+        help="Generate release notes from Git repositories.",
+        no_args_is_help=True,
+        rich_markup_mode="rich",
+    )
 
 
 app = _typer_app()
@@ -176,8 +190,16 @@ app = _typer_app()
 
 def _version_callback(value: bool) -> bool:
     if value:
-        typer.echo(f"{APP_NAME} v{__version__}")
+        console = get_console()
+        console.print(f"[bold primary]{APP_NAME}[/] [muted]v{__version__}[/]")
         raise typer.Exit()
+    return value
+
+
+def _theme_callback(value: Optional[ThemeChoice]) -> Optional[ThemeChoice]:
+    """Set the theme when provided."""
+    if value is not None:
+        set_theme(value.value)
     return value
 
 
@@ -190,9 +212,21 @@ def _main_callback(
         callback=_version_callback,
         is_eager=True,
         help="Show HelixCommit version and exit.",
-    )
+    ),
+    theme: Optional[ThemeChoice] = typer.Option(
+        None,
+        "--theme",
+        "-t",
+        callback=_theme_callback,
+        is_eager=True,
+        help="Color theme: dark, light, or auto.",
+        case_sensitive=False,
+    ),
 ) -> None:
-    """Global options available to all commands."""
+    """[bold cyan]HelixCommit[/] - AI-powered release notes generator.
+    
+    Generate beautiful release notes from your Git commit history with AI-powered summarization.
+    """
     return
 
 
@@ -388,6 +422,7 @@ def generate(
     if author_filter is None:
         author_filter = file_config.generate.author_filter
 
+    console = get_console()
     git_repo = GitRepository(repo)
 
     commit_range, context = _resolve_commit_range(
@@ -408,18 +443,23 @@ def generate(
 
     normalized_section_order = _normalize_section_order(section_order)
     if section_order and not normalized_section_order:
-        raise typer.BadParameter(
-            "--section-order only accepts known section keys or titles (e.g., feat, fix, docs)."
-        )
+        console.print(error_panel(
+            "--section-order only accepts known section keys or titles (e.g., feat, fix, docs).",
+            title="Invalid Parameter",
+        ))
+        raise typer.Exit(code=1)
 
     collect_files = bool(include_paths or exclude_paths)
-    commits = list(
-        git_repo.iter_commits(
-            commit_range,
-            include_diffs=include_diffs,
-            include_files=collect_files,
+    
+    # Collect commits with progress indicator
+    with console.status("[progress.spinner]Scanning commits...[/]", spinner="dots"):
+        commits = list(
+            git_repo.iter_commits(
+                commit_range,
+                include_diffs=include_diffs,
+                include_files=collect_files,
+            )
         )
-    )
 
     # Apply filtering
     commits = filter_commits(
@@ -434,10 +474,12 @@ def generate(
     if not commits:
         message = "No commits found for the selected range."
         if fail_on_empty:
-            typer.echo(message, err=True)
+            console.print(error_panel(message, title="No Commits"))
             raise typer.Exit(code=1)
-        typer.echo(message)
+        console.print(info_panel(message, title="No Commits"))
         return
+    
+    console.print(f"[muted]Found[/] [primary]{len(commits)}[/] [muted]commits to process[/]")
 
     # Detect platform and attach PR/MR numbers
     github_slug = git_repo.get_github_slug()
@@ -463,22 +505,23 @@ def generate(
     bitbucket_client: Optional[BitbucketClient] = None
     try:
         if not no_prs:
-            if platform == "github" and github_slug:
-                settings = GitHubSettings(
-                    owner=github_slug[0], repo=github_slug[1], token=github_token
-                )
-                github_client = GitHubClient(settings)
-                pr_index, commit_prs = _enrich_with_pull_requests(github_client, commits)
-            elif platform == "gitlab" and gitlab_slug:
-                settings = GitLabSettings(project_path=gitlab_slug, token=gitlab_token)
-                gitlab_client = GitLabClient(settings)
-                pr_index, commit_prs = _enrich_with_merge_requests(gitlab_client, commits)
-            elif platform == "bitbucket" and bitbucket_slug:
-                settings = BitbucketSettings(
-                    workspace=bitbucket_slug[0], repo_slug=bitbucket_slug[1], token=bitbucket_token
-                )
-                bitbucket_client = BitbucketClient(settings)
-                pr_index, commit_prs = _enrich_with_bitbucket_pull_requests(bitbucket_client, commits)
+            with console.status("[progress.spinner]Fetching pull request information...[/]", spinner="dots"):
+                if platform == "github" and github_slug:
+                    settings = GitHubSettings(
+                        owner=github_slug[0], repo=github_slug[1], token=github_token
+                    )
+                    github_client = GitHubClient(settings)
+                    pr_index, commit_prs = _enrich_with_pull_requests(github_client, commits)
+                elif platform == "gitlab" and gitlab_slug:
+                    settings = GitLabSettings(project_path=gitlab_slug, token=gitlab_token)
+                    gitlab_client = GitLabClient(settings)
+                    pr_index, commit_prs = _enrich_with_merge_requests(gitlab_client, commits)
+                elif platform == "bitbucket" and bitbucket_slug:
+                    settings = BitbucketSettings(
+                        workspace=bitbucket_slug[0], repo_slug=bitbucket_slug[1], token=bitbucket_token
+                    )
+                    bitbucket_client = BitbucketClient(settings)
+                    pr_index, commit_prs = _enrich_with_bitbucket_pull_requests(bitbucket_client, commits)
     finally:
         if github_client:
             github_client.close()
@@ -496,7 +539,11 @@ def generate(
             else:
                 validated_key = _validate_api_key("openai", openai_api_key)
         except MissingApiKeyError as e:
-            typer.echo(str(e), err=True)
+            console.print(error_panel(
+                str(e),
+                title="Missing API Key",
+                hint="Set the environment variable or pass it via command line.",
+            ))
             raise typer.Exit(code=1) from None
 
         cache_path = summary_cache or (repo / DEFAULT_SUMMARY_CACHE)
@@ -520,6 +567,7 @@ def generate(
                 model=openai_model,
                 **summarizer_kwargs,
             )
+        console.print(f"[muted]Using AI provider:[/] [primary]{llm_provider}[/]")
 
     # Build changelog
     builder = ChangelogBuilder(
@@ -532,13 +580,24 @@ def generate(
     tag_date = getattr(context.until_tag, "date", None) if context.until_tag else None
     release_date = tag_date if tag_date else datetime.now(timezone.utc)
 
-    changelog = builder.build(
-        version=version_name,
-        release_date=release_date,
-        commits=commits,
-        commit_prs=commit_prs,
-        pr_index=pr_index,
-    )
+    # Build changelog with AI spinner if using LLM
+    if use_llm:
+        with console.status("[progress.spinner]Generating AI summaries...[/]", spinner="dots"):
+            changelog = builder.build(
+                version=version_name,
+                release_date=release_date,
+                commits=commits,
+                commit_prs=commit_prs,
+                pr_index=pr_index,
+            )
+    else:
+        changelog = builder.build(
+            version=version_name,
+            release_date=release_date,
+            commits=commits,
+            commit_prs=commit_prs,
+            pr_index=pr_index,
+        )
 
     compare_url = _compute_compare_url(github_slug, gitlab_slug, bitbucket_slug, context)
     if compare_url:
@@ -555,10 +614,15 @@ def generate(
         template_path=template_path,
         use_templates=use_builtin_templates or template_path is not None,
     )
-    _write_output(output, out)
-    typer.echo(
-        f"Generated changelog with {sum(len(section.items) for section in changelog.sections)} entries."
-    )
+    _write_output(output, out, console)
+    
+    # Summary stats
+    total_entries = sum(len(section.items) for section in changelog.sections)
+    console.print(success_panel(
+        f"Generated changelog with {total_entries} entries",
+        title="Success",
+        details=f"Version: {version_name} | Format: {output_format.value}",
+    ))
 
 
 @app.command()
@@ -664,8 +728,14 @@ def generate_commit(
         None, envvar="OPENROUTER_API_KEY", help="OpenRouter API key."
     ),
     no_confirm: bool = typer.Option(False, help="Skip confirmation (not recommended)."),
+    show_diff: bool = typer.Option(True, "--show-diff/--no-show-diff", help="Show staged diff preview."),
 ) -> None:
     """Generate a commit message from staged changes."""
+    from .ui.panels import diff_panel
+    from rich.panel import Panel
+    from rich.text import Text
+    
+    console = get_console()
     repo = repo.resolve()
 
     # Load config file from repo (or explicit config path)
@@ -685,8 +755,18 @@ def generate_commit(
     # 2. Check for staged changes
     diff = git_repo.get_diff(staged=True)
     if not diff.strip():
-        typer.echo("No staged changes found. Stage some changes with 'git add' first.")
+        console.print(error_panel(
+            "No staged changes found.",
+            title="No Changes",
+            hint="Stage some changes with 'git add' first.",
+        ))
         raise typer.Exit(1)
+
+    # Show diff preview if requested
+    if show_diff:
+        console.print()
+        console.print(diff_panel(diff, title="Staged Changes", max_lines=30))
+        console.print()
 
     # 3. Setup AI - validate API key
     try:
@@ -695,7 +775,11 @@ def generate_commit(
             openrouter_api_key if llm_provider == "openrouter" else openai_api_key,
         )
     except MissingApiKeyError as e:
-        typer.echo(str(e), err=True)
+        console.print(error_panel(
+            str(e),
+            title="Missing API Key",
+            hint="Set the environment variable or pass it via command line.",
+        ))
         raise typer.Exit(1) from None
 
     model = openrouter_model if llm_provider == "openrouter" else openai_model
@@ -704,57 +788,359 @@ def generate_commit(
     try:
         generator = CommitGenerator(api_key=api_key, model=model, base_url=base_url)
     except ImportError as e:
-        typer.echo(str(e))
+        console.print(error_panel(str(e), title="Import Error"))
         raise typer.Exit(1) from None
 
-    # 4. Generate
-    typer.echo("Analyzing changes...")
-    response = generator.generate(diff)
+    # 4. Generate with spinner
+    with console.status("[progress.spinner]Analyzing changes with AI...[/]", spinner="dots"):
+        response = generator.generate(diff)
 
     # 5. Interactive Loop
     while True:
-        typer.echo("\nAI Response:")
-        typer.echo("--------------------------------------------------")
-        typer.echo(response)
-        typer.echo("--------------------------------------------------")
+        # Display AI response in a styled panel
+        response_panel = Panel(
+            Text(response),
+            title="[primary]AI Response[/]",
+            border_style="primary",
+        )
+        console.print()
+        console.print(response_panel)
+        console.print()
 
         if no_confirm:
-            # If no confirm, we assume the response IS the message.
-            # But we still need to format it.
+            # If no confirm, auto-commit
             pass
 
-        choice = typer.prompt(
-            "\nAction? [c]ommit / [r]eply / [q]uit"
-        ).lower()
+        console.print("[muted]c:[/] [primary]commit[/]  [muted]r:[/] [primary]reply[/]  [muted]q:[/] [primary]quit[/]")
+        choice = typer.prompt("Choice").lower()
 
         if choice == "q":
-            typer.echo("Aborted.")
+            console.print(info_panel("Operation cancelled.", title="Aborted"))
             raise typer.Exit(0)
 
         elif choice == "c":
-            # Extract potential message from response
-            match = re.search(r"\d{2}-\d{2}-\d{4}: .+", response)
-            if match:
-                commit_msg = match.group(0)
-            else:
-                # Prepend date if missing
-                today_str = datetime.now().strftime("%m-%d-%Y")
-                if response.strip().startswith(today_str):
-                    commit_msg = response.strip()
-                else:
-                    commit_msg = f"{today_str}: {response.strip()}"
+            # Use the AI response directly as the commit message
+            commit_msg = response.strip()
 
-            confirm = typer.confirm(f"Commit with message:\n'{commit_msg}'?")
+            # Show proposed message
+            msg_panel = Panel(
+                Text(commit_msg, style="bold"),
+                title="[accent]Proposed Commit Message[/]",
+                border_style="accent",
+            )
+            console.print(msg_panel)
+            
+            confirm = typer.confirm("Commit with this message?")
             if confirm:
                 git_repo.commit(commit_msg)
-                typer.echo("Committed!")
+                console.print(success_panel(
+                    "Changes committed successfully!",
+                    title="Committed",
+                    details=f"Message: {commit_msg[:60]}...",
+                ))
                 break
             else:
-                typer.echo("Commit cancelled. You can reply to refine.")
+                console.print("[muted]Commit cancelled. You can reply to refine.[/]")
 
         elif choice == "r":
             user_feedback = typer.prompt("Your reply")
-            response = generator.chat(user_feedback)
+            with console.status("[progress.spinner]Processing your feedback...[/]", spinner="dots"):
+                response = generator.chat(user_feedback)
+
+
+@app.command()
+def preview(
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+        help="Repository path.",
+    ),
+    since_tag: Optional[str] = typer.Option(None, help="Commits after this tag."),
+    until_tag: Optional[str] = typer.Option(None, help="Commits up to this tag."),
+    since: Optional[str] = typer.Option(None, help="Commits after this ref."),
+    until: Optional[str] = typer.Option(None, help="Commits up to this ref."),
+    unreleased: bool = typer.Option(False, help="Show HEAD vs latest tag."),
+    max_items: Optional[int] = typer.Option(None, help="Limit commits."),
+    no_merge_commits: bool = typer.Option(False, help="Exclude merge commits."),
+) -> None:
+    """Preview changelog in a beautifully formatted panel.
+    
+    Shows a live preview of what your changelog will look like without 
+    generating any files.
+    """
+    from .ui.panels import changelog_panel, section_panel
+    from .ui.tables import commits_table, changelog_table
+    from rich.console import Group
+    from rich.rule import Rule
+    
+    console = get_console()
+    repo = repo.resolve()
+    git_repo = GitRepository(repo)
+
+    commit_range, context = _resolve_commit_range(
+        git_repo,
+        since_tag=since_tag,
+        until_tag=until_tag,
+        since=since,
+        until=until,
+        since_date=None,
+        until_date=None,
+        unreleased=unreleased,
+        include_merges=not no_merge_commits,
+        max_items=max_items,
+    )
+
+    with console.status("[progress.spinner]Loading commits...[/]", spinner="dots"):
+        commits = list(git_repo.iter_commits(commit_range))
+
+    if not commits:
+        console.print(info_panel("No commits found for the selected range.", title="Preview"))
+        return
+
+    # Show commit summary table
+    console.print()
+    console.print(Rule("[primary]Commit Preview[/]", style="primary"))
+    console.print()
+    console.print(commits_table(commits[:20], title=f"Recent Commits ({len(commits)} total)"))
+    console.print()
+
+    # Build a simple changelog preview
+    builder = ChangelogBuilder(summarizer=None, include_scopes=True)
+    version_name = context.until_tag.name if context.until_tag else "Unreleased"
+    release_date = datetime.now(timezone.utc)
+
+    changelog = builder.build(
+        version=version_name,
+        release_date=release_date,
+        commits=commits,
+    )
+
+    # Show changelog preview
+    console.print(Rule("[primary]Changelog Preview[/]", style="primary"))
+    console.print()
+    console.print(changelog_panel(changelog, show_metadata=False))
+    console.print()
+    
+    # Summary stats
+    total_entries = sum(len(section.items) for section in changelog.sections)
+    section_counts = {section.title: len(section.items) for section in changelog.sections if section.items}
+    
+    console.print(f"[muted]Total entries:[/] [primary]{total_entries}[/]")
+    for title, count in section_counts.items():
+        console.print(f"  [muted]•[/] {title}: [accent]{count}[/]")
+
+
+@app.command()
+def browse(
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+        help="Repository path.",
+    ),
+    since_tag: Optional[str] = typer.Option(None, help="Commits after this tag."),
+    until_tag: Optional[str] = typer.Option(None, help="Commits up to this tag."),
+    since: Optional[str] = typer.Option(None, help="Commits after this ref."),
+    until: Optional[str] = typer.Option(None, help="Commits up to this ref."),
+    unreleased: bool = typer.Option(False, help="Show HEAD vs latest tag."),
+    max_items: int = typer.Option(50, help="Maximum commits to show."),
+    no_merge_commits: bool = typer.Option(False, help="Exclude merge commits."),
+    show_body: bool = typer.Option(False, "--show-body", help="Show commit bodies."),
+) -> None:
+    """Browse commits interactively with detailed views.
+    
+    Navigate through commits with arrow keys, view details, and explore
+    your commit history in a rich terminal interface.
+    """
+    from .ui.panels import commit_panel
+    from .ui.tables import commits_table
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.rule import Rule
+    
+    console = get_console()
+    repo = repo.resolve()
+    git_repo = GitRepository(repo)
+
+    commit_range, context = _resolve_commit_range(
+        git_repo,
+        since_tag=since_tag,
+        until_tag=until_tag,
+        since=since,
+        until=until,
+        since_date=None,
+        until_date=None,
+        unreleased=unreleased,
+        include_merges=not no_merge_commits,
+        max_items=max_items,
+    )
+
+    with console.status("[progress.spinner]Loading commits...[/]", spinner="dots"):
+        commits = list(git_repo.iter_commits(commit_range))
+
+    if not commits:
+        console.print(info_panel("No commits found for the selected range.", title="Browse"))
+        return
+
+    console.print()
+    console.print(Rule(f"[primary]Commit Browser[/] [muted]({len(commits)} commits)[/]", style="primary"))
+    console.print()
+
+    # Display all commits in a table
+    console.print(commits_table(commits, title="Commits"))
+    console.print()
+
+    # Interactive mode - show details for selected commits
+    current_index = 0
+    while True:
+        console.print()
+        console.print(f"[muted]Viewing commit[/] [primary]{current_index + 1}[/] [muted]of[/] [primary]{len(commits)}[/]")
+        console.print()
+        
+        commit = commits[current_index]
+        console.print(commit_panel(commit, show_body=show_body, show_diff=False))
+        console.print()
+        
+        console.print("[muted]Navigation:[/] [primary][n][/]ext  [primary][p][/]rev  [primary][d][/]iff  [primary][q][/]uit")
+        choice = typer.prompt("Choice", default="n").lower()
+        
+        if choice == "q":
+            break
+        elif choice == "n":
+            current_index = min(current_index + 1, len(commits) - 1)
+        elif choice == "p":
+            current_index = max(current_index - 1, 0)
+        elif choice == "d":
+            # Show diff for current commit
+            diff = git_repo.get_commit_diff(commit.sha)
+            if diff:
+                from .ui.panels import diff_panel
+                console.print(diff_panel(diff, title=f"Diff for {commit.short_sha()}"))
+            else:
+                console.print("[muted]No diff available for this commit.[/]")
+        
+        console.clear()
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query (searches subject, author, body)."),
+    repo: Path = typer.Option(
+        Path.cwd(),
+        "--repo",
+        exists=True,
+        file_okay=False,
+        resolve_path=True,
+        help="Repository path.",
+    ),
+    author: Optional[str] = typer.Option(None, "--author", "-a", help="Filter by author (regex)."),
+    commit_type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by commit type (feat, fix, etc.)."),
+    since_tag: Optional[str] = typer.Option(None, help="Search commits after this tag."),
+    until_tag: Optional[str] = typer.Option(None, help="Search commits up to this tag."),
+    since: Optional[str] = typer.Option(None, help="Search commits after this ref."),
+    until: Optional[str] = typer.Option(None, help="Search commits up to this ref."),
+    max_results: int = typer.Option(50, help="Maximum results to show."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Case-sensitive search."),
+) -> None:
+    """Search commits by keyword, author, or type.
+    
+    Quickly find commits matching your search criteria with highlighted
+    results and detailed information.
+    """
+    from .ui.tables import search_results_table
+    from .ui.panels import commit_panel
+    from rich.rule import Rule
+    import re as regex_module
+    
+    console = get_console()
+    repo = repo.resolve()
+    git_repo = GitRepository(repo)
+
+    commit_range, context = _resolve_commit_range(
+        git_repo,
+        since_tag=since_tag,
+        until_tag=until_tag,
+        since=since,
+        until=until,
+        since_date=None,
+        until_date=None,
+        unreleased=False,
+        include_merges=True,
+        max_items=500,  # Search through more commits
+    )
+
+    with console.status(f"[progress.spinner]Searching for '{query}'...[/]", spinner="dots"):
+        all_commits = list(git_repo.iter_commits(commit_range))
+        
+        # Build search pattern
+        flags = 0 if case_sensitive else regex_module.IGNORECASE
+        try:
+            pattern = regex_module.compile(query, flags)
+        except regex_module.error:
+            # Fall back to literal search if regex is invalid
+            pattern = regex_module.compile(regex_module.escape(query), flags)
+        
+        # Filter commits
+        results = []
+        for commit in all_commits:
+            # Check query against subject, body, author
+            searchable = f"{commit.subject} {commit.body} {commit.author_name} {commit.author_email}"
+            if not pattern.search(searchable):
+                continue
+            
+            # Apply author filter
+            if author:
+                author_pattern = regex_module.compile(author, regex_module.IGNORECASE)
+                if not author_pattern.search(f"{commit.author_name} {commit.author_email}"):
+                    continue
+            
+            # Apply type filter
+            if commit_type:
+                parsed_type = _extract_commit_type_from_subject(commit.subject)
+                if parsed_type != commit_type.lower():
+                    continue
+            
+            results.append(commit)
+            if len(results) >= max_results:
+                break
+
+    console.print()
+    console.print(Rule(f"[primary]Search Results[/] [muted]for '{query}'[/]", style="primary"))
+    console.print()
+
+    if not results:
+        console.print(info_panel(
+            f"No commits found matching '{query}'",
+            title="No Results",
+        ))
+        return
+
+    console.print(search_results_table(results, query=query, highlight_matches=True))
+    console.print()
+    console.print(f"[muted]Found[/] [primary]{len(results)}[/] [muted]matching commits[/]")
+    
+    # Offer to view details
+    if results and typer.confirm("\nView commit details?", default=False):
+        for i, commit in enumerate(results[:10]):
+            console.print()
+            console.print(f"[muted]Result {i + 1} of {min(len(results), 10)}[/]")
+            console.print(commit_panel(commit, show_body=True))
+            if i < min(len(results), 10) - 1:
+                if not typer.confirm("Show next?", default=True):
+                    break
+
+
+def _extract_commit_type_from_subject(subject: str) -> Optional[str]:
+    """Extract commit type from a conventional commit subject."""
+    match = re.match(r"^(\w+)(?:\([^)]+\))?[!:]", subject)
+    if match:
+        return match.group(1).lower()
+    return None
 
 
 def _resolve_commit_range(
@@ -1033,14 +1419,18 @@ def _render_output(
     raise typer.BadParameter(f"Unsupported format: {output_format}")
 
 
-def _write_output(content: str, destination: Optional[Path]) -> None:
+def _write_output(content: str, destination: Optional[Path], console=None) -> None:
+    if console is None:
+        console = get_console()
+    
     if destination:
         destination = destination.expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
-        typer.echo(f"Wrote changelog to {destination}")
+        console.print(f"[muted]Wrote changelog to[/] [primary]{destination}[/]")
     else:
-        typer.echo(content)
+        # Print the raw content (not styled, for piping/file output compatibility)
+        console.print(content, markup=False, highlight=False)
 
 
 def _normalize_section_order(values: Optional[Sequence[str]]) -> Optional[List[str]]:

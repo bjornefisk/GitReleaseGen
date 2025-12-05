@@ -13,6 +13,13 @@ from .template import (
     detect_format_from_template,
     render_template,
 )
+from .ui import (
+    get_console,
+    get_err_console,
+    set_theme,
+    DARK_THEME,
+    LIGHT_THEME,
+)
 
 __all__ = [
     "__version__",
@@ -25,6 +32,12 @@ __all__ = [
     "changelog_to_context",
     "detect_format_from_template",
     "render_template",
+    # UI exports
+    "get_console",
+    "get_err_console",
+    "set_theme",
+    "DARK_THEME",
+    "LIGHT_THEME",
 ]
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
