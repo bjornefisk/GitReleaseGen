@@ -724,7 +724,7 @@ def generate_commit(
             pass
 
         choice = typer.prompt(
-            "\nAction? [c]ommit / [r]eply / [q]uit", default="c"
+            "\nAction? [c]ommit / [r]eply / [q]uit"
         ).lower()
 
         if choice == "q":

@@ -284,7 +284,7 @@ section_order = ["fix", "feat"]
 def test_config_loader_loads_filter_options_yaml(tmp_path):
     """ConfigLoader correctly parses filter options from YAML."""
     config_file = tmp_path / ".helixcommit.yaml"
-        config_file.write_text("""generate:
+    config_file.write_text("""generate:
     include_types:
         - feat
         - fix
