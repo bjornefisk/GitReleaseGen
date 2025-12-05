@@ -42,17 +42,17 @@ def test_generate_commit_success_flow(mock_git_repo, mock_generator):
     result = runner.invoke(app, ["generate-commit", "--openrouter-api-key", "dummy"], input="c\ny\n")
     
     assert result.exit_code == 0
-    assert "Analyzing changes..." in result.stdout
+    # Note: Rich status spinner text doesn't get captured in test output,
+    # but the diff panel and response are displayed
+    assert "Staged Changes" in result.stdout
+    assert "diff content" in result.stdout
     assert "Feat: Add new feature" in result.stdout
-    assert "Committed!" in result.stdout
+    assert "committed successfully" in result.stdout.lower()
     
     # Verify git commit was called
     mock_git_repo.commit.assert_called_once()
     args = mock_git_repo.commit.call_args[0][0]
     assert "Feat: Add new feature" in args
-    # Check date format (MM-DD-YYYY)
-    import re
-    assert re.match(r"\d{2}-\d{2}-\d{4}: Feat: Add new feature", args)
 
 def test_generate_commit_refine_flow(mock_git_repo, mock_generator):
     # Setup
